@@ -1,0 +1,149 @@
+version: '3.9'
+
+# ─────────────────────────────────────────────────────────────────────
+# Aryan JIP Assistant — Local Development Stack
+# Run with: docker-compose up --build
+# ─────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ──────────────────────────────────────────
+  # PostgreSQL — Primary Database
+  # ──────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: jip-postgres
+    environment:
+      POSTGRES_DB: jip_db
+      POSTGRES_USER: jip_user
+      POSTGRES_PASSWORD: jip_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jip_user -d jip_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jip-net
+
+  # ──────────────────────────────────────────
+  # Redis — Caching Layer
+  # ──────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: jip-redis
+    command: redis-server --requirepass jip_redis_pass
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "jip_redis_pass", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - jip-net
+
+  # ──────────────────────────────────────────
+  # Kafka + Zookeeper — Event Streaming
+  # ──────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: jip-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - jip-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: jip-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    networks:
+      - jip-net
+
+  # Kafka UI — Browse topics & messages at http://localhost:8090
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: jip-kafka-ui
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      - kafka
+    networks:
+      - jip-net
+
+  # ──────────────────────────────────────────
+  # Spring Boot Backend API
+  # ──────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend/springboot-api
+      dockerfile: Dockerfile
+    container_name: jip-backend
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DB_URL: jdbc:postgresql://postgres:5432/jip_db
+      DB_USERNAME: jip_user
+      DB_PASSWORD: jip_pass
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: jip_redis_pass
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      JWT_SECRET: aryan-jip-super-secret-key-256-bits-long-for-production
+      JWT_EXPIRATION_MS: 3600000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - jip-net
+
+  # ──────────────────────────────────────────
+  # Next.js Frontend
+  # ──────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend/nextjs-ui
+      dockerfile: Dockerfile
+    container_name: jip-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+    depends_on:
+      - backend
+    networks:
+      - jip-net
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  jip-net:
+    driver: bridge
